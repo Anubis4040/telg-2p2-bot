@@ -4,6 +4,7 @@ import logging
 import os
 import threading
 import time
+from http.server import BaseHTTPRequestHandler, HTTPServer
 import requests
 
 logging.basicConfig(
@@ -23,6 +24,22 @@ MAX_COMMANDS_PER_MINUTE = 10
 MAX_NOTIFICATIONS_PER_CYCLE = 5
 RETRY_MAX_ATTEMPTS = 3
 RETRY_BASE_DELAY = 1
+HEALTH_PORT = int(os.environ.get("PORT", 8080))
+
+
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"OK")
+
+    def log_message(self, format, *args):
+        pass
+
+
+def start_health_server():
+    server = HTTPServer(("0.0.0.0", HEALTH_PORT), HealthHandler)
+    server.serve_forever()
 
 
 def load_config():
@@ -353,9 +370,11 @@ def main():
 
     t1 = threading.Thread(target=telegram_listener, args=(token, chat_id, bot_state, command_times), daemon=True)
     t2 = threading.Thread(target=binance_monitor, args=(token, chat_id, bot_state), daemon=True)
+    t3 = threading.Thread(target=start_health_server, daemon=True)
 
     t1.start()
     t2.start()
+    t3.start()
 
     t1.join()
     t2.join()

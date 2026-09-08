@@ -9,6 +9,12 @@ primary_region = 'iad'
   MAX_PRICE = '1.09'
   POLL_INTERVAL = '60'
 
+[http_service]
+  internal_port = 8080
+  auto_stop_machines = false
+  auto_start_machines = true
+  force_https = true
+
 [[vm]]
   cpu_kind = 'shared'
   cpus = 1

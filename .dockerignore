@@ -1,0 +1,12 @@
+.git
+.gitignore
+.dockerignore
+fly.toml
+config.json
+config.example.json
+README.md
+__pycache__
+*.pyc
+*.pyo
+.env
+Dockerfile

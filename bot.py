@@ -1,3 +1,4 @@
+import collections
 import json
 import logging
 import os
@@ -16,6 +17,11 @@ HEADERS = {
     "Content-Type": "application/json",
     "User-Agent": "Mozilla/5.0",
 }
+
+MAX_COMMANDS_PER_MINUTE = 10
+MAX_NOTIFICATIONS_PER_CYCLE = 5
+RETRY_MAX_ATTEMPTS = 3
+RETRY_BASE_DELAY = 1
 
 
 def load_config():
@@ -43,12 +49,31 @@ def save_config(config):
         json.dump(config, f, indent=2, ensure_ascii=False)
 
 
+def check_rate_limit(user_id, command_times):
+    now = time.time()
+    cutoff = now - 60
+    command_times[user_id] = [t for t in command_times[user_id] if t > cutoff]
+    if len(command_times[user_id]) >= MAX_COMMANDS_PER_MINUTE:
+        return False
+    command_times[user_id].append(now)
+    return True
+
+
 def send_telegram(token, chat_id, text):
     url = f"https://api.telegram.org/bot{token}/sendMessage"
-    try:
-        requests.post(url, json={"chat_id": chat_id, "text": text}, timeout=10)
-    except requests.RequestException as e:
-        logger.error("Error al enviar mensaje de Telegram: %s", e)
+    for attempt in range(RETRY_MAX_ATTEMPTS):
+        try:
+            resp = requests.post(url, json={"chat_id": chat_id, "text": text}, timeout=10)
+            if resp.status_code == 429:
+                retry_after = resp.json().get("parameters", {}).get("retry_after", 5)
+                logger.warning("Telegram rate limit, esperando %ds", retry_after)
+                time.sleep(retry_after)
+                continue
+            return
+        except requests.RequestException as e:
+            delay = RETRY_BASE_DELAY * (2 ** attempt)
+            logger.error("Error Telegram (intento %d/%d): %s, retry en %ds", attempt + 1, RETRY_MAX_ATTEMPTS, e, delay)
+            time.sleep(delay)
 
 
 def get_updates(token, offset):
@@ -70,13 +95,16 @@ def fetch_p2p_orders(config):
         "asset": config["crypto"],
         "payTypes": config.get("payment_methods", []),
     }
-    try:
-        resp = requests.post(API_URL, json=payload, headers=HEADERS, timeout=15)
-        resp.raise_for_status()
-        return resp.json().get("data", [])
-    except requests.RequestException as e:
-        logger.error("Error al consultar API P2P: %s", e)
-        return []
+    for attempt in range(RETRY_MAX_ATTEMPTS):
+        try:
+            resp = requests.post(API_URL, json=payload, headers=HEADERS, timeout=15)
+            resp.raise_for_status()
+            return resp.json().get("data", [])
+        except requests.RequestException as e:
+                delay = RETRY_BASE_DELAY * (2 ** attempt)
+                logger.error("Error API P2P (intento %d/%d): %s, retry en %ds", attempt + 1, RETRY_MAX_ATTEMPTS, e, delay)
+                time.sleep(delay)
+    return []
 
 
 def get_valid_orders(orders, max_price):
@@ -238,6 +266,7 @@ def main():
     print("Envía /start en Telegram para comenzar a monitorear.\n")
 
     bot_state = {"running": False, "seen": {}, "first_run": True, "last_best_price": None}
+    command_times = collections.defaultdict(list)
     offset = 0
 
     while True:
@@ -250,6 +279,9 @@ def main():
             msg_chat_id = str(msg.get("chat", {}).get("id", ""))
 
             if text and msg_chat_id == chat_id:
+                if not check_rate_limit(msg_chat_id, command_times):
+                    send_telegram(token, chat_id, "⏳ Límite de comandos alcanzado. Espera un minuto.")
+                    continue
                 result = handle_command(token, chat_id, text, bot_state)
                 if result is True:
                     break
@@ -262,6 +294,8 @@ def main():
             valid = get_valid_orders(orders, config["max_price"])
             logger.info("Consulta API: %d ordenes totales, %d validas (filtro <= $%s)", len(orders), len(valid), config["max_price"])
 
+            notifications_sent = 0
+
             if bot_state["first_run"]:
                 for order in valid:
                     adv = order.get("adv", {})
@@ -270,6 +304,9 @@ def main():
                 logger.info("Primera ejecucion: %d ordenes existentes registradas", len(valid))
             else:
                 for order in valid:
+                    if notifications_sent >= MAX_NOTIFICATIONS_PER_CYCLE:
+                        logger.warning("Limite de notificaciones por ciclo alcanzado (%d)", MAX_NOTIFICATIONS_PER_CYCLE)
+                        break
                     adv = order.get("adv", {})
                     order_id = adv.get("advNo")
                     try:
@@ -281,20 +318,24 @@ def main():
                         bot_state["seen"][order_id] = current_price
                         msg = format_message(order)
                         send_telegram(token, chat_id, msg)
+                        notifications_sent += 1
                         logger.info("Orden nueva notificada: %s ($%.4f)", order_id, current_price)
                     elif current_price != bot_state["seen"][order_id]:
                         old_price = bot_state["seen"][order_id]
                         bot_state["seen"][order_id] = current_price
                         msg = f"🔄 Cambio de precio detectado!\n\n" + format_message(order) + f"\n\nPrecio anterior: ${old_price:.4f}"
                         send_telegram(token, chat_id, msg)
+                        notifications_sent += 1
                         logger.info("Precio cambiado: %s $%.4f -> $%.4f", order_id, old_price, current_price)
 
             best = find_best_price(valid)
             if best:
                 best_price = float(best.get("adv", {}).get("price", 0))
                 if bot_state["last_best_price"] is None or best_price != bot_state["last_best_price"]:
-                    msg = format_best_price_message(best, config["max_price"])
-                    send_telegram(token, chat_id, msg)
+                    if notifications_sent < MAX_NOTIFICATIONS_PER_CYCLE:
+                        msg = format_best_price_message(best, config["max_price"])
+                        send_telegram(token, chat_id, msg)
+                        notifications_sent += 1
                     bot_state["last_best_price"] = best_price
                     logger.info("Mejor precio actualizado: %s", best_price)
                 else:

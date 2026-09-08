@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 import time
 import requests
 
@@ -18,8 +19,23 @@ HEADERS = {
 
 
 def load_config():
-    with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
+    env = os.environ.get
+    config = {
+        "telegram_bot_token": env("TELEGRAM_BOT_TOKEN"),
+        "telegram_chat_id": env("TELEGRAM_CHAT_ID"),
+        "crypto": env("CRYPTO", "USDT"),
+        "fiat": env("FIAT", "USD"),
+        "max_price": float(env("MAX_PRICE", 1.09)),
+        "payment_methods": env("PAYMENT_METHODS", "").split(",") if env("PAYMENT_METHODS", "") else [],
+        "poll_interval": int(env("POLL_INTERVAL", 60)),
+    }
+    if not config["telegram_bot_token"] or not config["telegram_chat_id"]:
+        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+            file_config = json.load(f)
+        for key, value in file_config.items():
+            if key not in config or config[key] in (None, "", []):
+                config[key] = value
+    return config
 
 
 def save_config(config):

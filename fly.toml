@@ -1,4 +1,4 @@
-app = 'binance-p2p-bot'
+app = 'binance-p2p-bot-aged-meadowlark-5171'
 primary_region = 'iad'
 
 [build]

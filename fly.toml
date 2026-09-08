@@ -1,0 +1,15 @@
+app = 'binance-p2p-bot'
+primary_region = 'iad'
+
+[build]
+
+[env]
+  CRYPTO = 'USDT'
+  FIAT = 'USD'
+  MAX_PRICE = '1.09'
+  POLL_INTERVAL = '60'
+
+[[vm]]
+  cpu_kind = 'shared'
+  cpus = 1
+  memory_mb = 256

@@ -2,6 +2,7 @@ import collections
 import json
 import logging
 import os
+import threading
 import time
 import requests
 
@@ -101,9 +102,9 @@ def fetch_p2p_orders(config):
             resp.raise_for_status()
             return resp.json().get("data", [])
         except requests.RequestException as e:
-                delay = RETRY_BASE_DELAY * (2 ** attempt)
-                logger.error("Error API P2P (intento %d/%d): %s, retry en %ds", attempt + 1, RETRY_MAX_ATTEMPTS, e, delay)
-                time.sleep(delay)
+            delay = RETRY_BASE_DELAY * (2 ** attempt)
+            logger.error("Error API P2P (intento %d/%d): %s, retry en %ds", attempt + 1, RETRY_MAX_ATTEMPTS, e, delay)
+            time.sleep(delay)
     return []
 
 
@@ -255,6 +256,84 @@ def handle_command(token, chat_id, text, bot_state):
     return None
 
 
+def telegram_listener(token, chat_id, bot_state, command_times):
+    offset = 0
+    while True:
+        updates = get_updates(token, offset)
+        for update in updates:
+            offset = update["update_id"] + 1
+            msg = update.get("message", {})
+            text = msg.get("text", "")
+            msg_chat_id = str(msg.get("chat", {}).get("id", ""))
+
+            if text and msg_chat_id == chat_id:
+                if not check_rate_limit(msg_chat_id, command_times):
+                    send_telegram(token, chat_id, "⏳ Límite de comandos alcanzado. Espera un minuto.")
+                    continue
+                handle_command(token, chat_id, text, bot_state)
+
+
+def binance_monitor(token, chat_id, bot_state):
+    while True:
+        if not bot_state["running"]:
+            time.sleep(1)
+            continue
+
+        config = load_config()
+        orders = fetch_p2p_orders(config)
+        valid = get_valid_orders(orders, config["max_price"])
+        logger.info("Consulta API: %d ordenes totales, %d validas (filtro <= $%s)", len(orders), len(valid), config["max_price"])
+
+        notifications_sent = 0
+
+        if bot_state["first_run"]:
+            for order in valid:
+                adv = order.get("adv", {})
+                bot_state["seen"][adv.get("advNo")] = float(adv.get("price", 0))
+            bot_state["first_run"] = False
+            logger.info("Primera ejecucion: %d ordenes existentes registradas", len(valid))
+        else:
+            for order in valid:
+                if notifications_sent >= MAX_NOTIFICATIONS_PER_CYCLE:
+                    logger.warning("Limite de notificaciones por ciclo alcanzado (%d)", MAX_NOTIFICATIONS_PER_CYCLE)
+                    break
+                adv = order.get("adv", {})
+                order_id = adv.get("advNo")
+                try:
+                    current_price = float(adv.get("price", 0))
+                except (ValueError, TypeError):
+                    continue
+
+                if order_id not in bot_state["seen"]:
+                    bot_state["seen"][order_id] = current_price
+                    msg = format_message(order)
+                    send_telegram(token, chat_id, msg)
+                    notifications_sent += 1
+                    logger.info("Orden nueva notificada: %s ($%.4f)", order_id, current_price)
+                elif current_price != bot_state["seen"][order_id]:
+                    old_price = bot_state["seen"][order_id]
+                    bot_state["seen"][order_id] = current_price
+                    msg = f"🔄 Cambio de precio detectado!\n\n" + format_message(order) + f"\n\nPrecio anterior: ${old_price:.4f}"
+                    send_telegram(token, chat_id, msg)
+                    notifications_sent += 1
+                    logger.info("Precio cambiado: %s $%.4f -> $%.4f", order_id, old_price, current_price)
+
+        best = find_best_price(valid)
+        if best:
+            best_price = float(best.get("adv", {}).get("price", 0))
+            if bot_state["last_best_price"] is None or best_price != bot_state["last_best_price"]:
+                if notifications_sent < MAX_NOTIFICATIONS_PER_CYCLE:
+                    msg = format_best_price_message(best, config["max_price"])
+                    send_telegram(token, chat_id, msg)
+                    notifications_sent += 1
+                bot_state["last_best_price"] = best_price
+                logger.info("Mejor precio actualizado: %s", best_price)
+            else:
+                logger.info("Mejor precio sin cambios: %s", best_price)
+
+        time.sleep(config["poll_interval"])
+
+
 def main():
     config = load_config()
     token = config["telegram_bot_token"]
@@ -267,83 +346,15 @@ def main():
 
     bot_state = {"running": False, "seen": {}, "first_run": True, "last_best_price": None}
     command_times = collections.defaultdict(list)
-    offset = 0
 
-    while True:
-        updates = get_updates(token, offset)
+    t1 = threading.Thread(target=telegram_listener, args=(token, chat_id, bot_state, command_times), daemon=True)
+    t2 = threading.Thread(target=binance_monitor, args=(token, chat_id, bot_state), daemon=True)
 
-        for update in updates:
-            offset = update["update_id"] + 1
-            msg = update.get("message", {})
-            text = msg.get("text", "")
-            msg_chat_id = str(msg.get("chat", {}).get("id", ""))
+    t1.start()
+    t2.start()
 
-            if text and msg_chat_id == chat_id:
-                if not check_rate_limit(msg_chat_id, command_times):
-                    send_telegram(token, chat_id, "⏳ Límite de comandos alcanzado. Espera un minuto.")
-                    continue
-                result = handle_command(token, chat_id, text, bot_state)
-                if result is True:
-                    break
-                elif result is False:
-                    break
-
-        if bot_state["running"]:
-            config = load_config()
-            orders = fetch_p2p_orders(config)
-            valid = get_valid_orders(orders, config["max_price"])
-            logger.info("Consulta API: %d ordenes totales, %d validas (filtro <= $%s)", len(orders), len(valid), config["max_price"])
-
-            notifications_sent = 0
-
-            if bot_state["first_run"]:
-                for order in valid:
-                    adv = order.get("adv", {})
-                    bot_state["seen"][adv.get("advNo")] = float(adv.get("price", 0))
-                bot_state["first_run"] = False
-                logger.info("Primera ejecucion: %d ordenes existentes registradas", len(valid))
-            else:
-                for order in valid:
-                    if notifications_sent >= MAX_NOTIFICATIONS_PER_CYCLE:
-                        logger.warning("Limite de notificaciones por ciclo alcanzado (%d)", MAX_NOTIFICATIONS_PER_CYCLE)
-                        break
-                    adv = order.get("adv", {})
-                    order_id = adv.get("advNo")
-                    try:
-                        current_price = float(adv.get("price", 0))
-                    except (ValueError, TypeError):
-                        continue
-
-                    if order_id not in bot_state["seen"]:
-                        bot_state["seen"][order_id] = current_price
-                        msg = format_message(order)
-                        send_telegram(token, chat_id, msg)
-                        notifications_sent += 1
-                        logger.info("Orden nueva notificada: %s ($%.4f)", order_id, current_price)
-                    elif current_price != bot_state["seen"][order_id]:
-                        old_price = bot_state["seen"][order_id]
-                        bot_state["seen"][order_id] = current_price
-                        msg = f"🔄 Cambio de precio detectado!\n\n" + format_message(order) + f"\n\nPrecio anterior: ${old_price:.4f}"
-                        send_telegram(token, chat_id, msg)
-                        notifications_sent += 1
-                        logger.info("Precio cambiado: %s $%.4f -> $%.4f", order_id, old_price, current_price)
-
-            best = find_best_price(valid)
-            if best:
-                best_price = float(best.get("adv", {}).get("price", 0))
-                if bot_state["last_best_price"] is None or best_price != bot_state["last_best_price"]:
-                    if notifications_sent < MAX_NOTIFICATIONS_PER_CYCLE:
-                        msg = format_best_price_message(best, config["max_price"])
-                        send_telegram(token, chat_id, msg)
-                        notifications_sent += 1
-                    bot_state["last_best_price"] = best_price
-                    logger.info("Mejor precio actualizado: %s", best_price)
-                else:
-                    logger.info("Mejor precio sin cambios: %s", best_price)
-
-            time.sleep(config["poll_interval"])
-        else:
-            time.sleep(1)
+    t1.join()
+    t2.join()
 
 
 if __name__ == "__main__":

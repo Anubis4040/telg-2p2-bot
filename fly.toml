@@ -9,13 +9,6 @@ primary_region = 'iad'
   MAX_PRICE = '1.09'
   POLL_INTERVAL = '60'
 
-[checks]
-  [checks.restart]
-    grace_period = "5s"
-    interval = "30s"
-    method = "none"
-    timeout = "5s"
-
 [[vm]]
   cpu_kind = 'shared'
   cpus = 1

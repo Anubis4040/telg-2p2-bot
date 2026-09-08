@@ -202,14 +202,18 @@ def handle_command(token, chat_id, text, bot_state):
         return False
 
     elif text == "/status":
-        seen_count = len(bot_state.get("seen", set()))
+        seen_count = len(bot_state.get("seen", {}))
+        best_price = bot_state.get("last_best_price")
+        best_price_str = f"${best_price:.4f}" if best_price else "N/A"
         msg = (
             f"📊 Estado del bot\n\n"
             f"Estado: {'🟢 Activo' if bot_state['running'] else '🔴 Inactivo'}\n"
             f"Par: {config['crypto']}/{config['fiat']}\n"
-            f"Precio máximo: ${config['max_price']}\n"
+            f"Método de pago: {', '.join(config['payment_methods']) or 'Todos'}\n"
+            f"Precio tope: ${config['max_price']}\n"
             f"Intervalo: {config['poll_interval']}s\n"
-            f"Órdenes notificadas: {seen_count}"
+            f"Órdenes rastreadas: {seen_count}\n\n"
+            f"💰 Mejor precio actual: {best_price_str}"
         )
         send_telegram(token, chat_id, msg)
         return None

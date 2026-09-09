@@ -356,13 +356,17 @@ def binance_monitor(token, chat_id, bot_state):
         time.sleep(config["poll_interval"])
 
 
+def handle_exit(signum, frame):
+    logger.info("Signal %d received, shutting down...", signum)
+
+
 def main():
     config = load_config()
     token = config["telegram_bot_token"]
     chat_id = config["telegram_chat_id"]
 
-    signal.signal(signal.SIGINT, lambda s, f: None)
-    signal.signal(signal.SIGTERM, lambda s, f: None)
+    signal.signal(signal.SIGINT, handle_exit)
+    signal.signal(signal.SIGTERM, handle_exit)
 
     print("Bot de Binance P2P Iniciado")
     print(f"Token: {token[:10]}...")
@@ -380,8 +384,11 @@ def main():
     t2.start()
     t3.start()
 
-    while True:
-        time.sleep(60)
+    try:
+        while True:
+            time.sleep(60)
+    except KeyboardInterrupt:
+        logger.info("KeyboardInterrupt received, shutting down...")
 
 
 if __name__ == "__main__":

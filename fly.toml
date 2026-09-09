@@ -12,7 +12,8 @@ primary_region = 'iad'
 [http_service]
   internal_port = 8080
   auto_stop_machines = "off"
-  auto_start_machines = true
+  auto_start_machines = false
+  min_machines_running = 1
   force_https = true
 
 [[vm]]

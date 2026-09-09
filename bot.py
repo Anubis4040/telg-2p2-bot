@@ -2,6 +2,7 @@ import collections
 import json
 import logging
 import os
+import signal
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -360,6 +361,9 @@ def main():
     token = config["telegram_bot_token"]
     chat_id = config["telegram_chat_id"]
 
+    signal.signal(signal.SIGINT, lambda s, f: None)
+    signal.signal(signal.SIGTERM, lambda s, f: None)
+
     print("Bot de Binance P2P Iniciado")
     print(f"Token: {token[:10]}...")
     print(f"Chat ID: {chat_id}")
@@ -376,8 +380,8 @@ def main():
     t2.start()
     t3.start()
 
-    t1.join()
-    t2.join()
+    while True:
+        time.sleep(60)
 
 
 if __name__ == "__main__":
